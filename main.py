@@ -360,10 +360,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sent_message = await update.message.reply_text(
             f"*🔰You are already a premium member!🔰*\n\n"
             f"*Steps to Use:*\n"
-            f"1️⃣ Go to Shutterstock's official website: https://www.shutterstock.com , and open any image.\n"
-            f"2️⃣ Below the image, you will see a share option. Click on it to copy the link.\n"
-            f"3️⃣ Paste this link into the downloader and click on the Download button.\n"
-            f"4️⃣ When the Get Image button appears after fetching the image, scroll down and click the Download Image button."
+            f"1️⃣ Go to Shutterstock's official website: https://www.istockphoto.com/ , and open any image.\n"
+            f"2️⃣ In browser address tap, copy the URL.\n"
+            f"3️⃣ Paste this URL into the downloader and click on the GET IMAGES button.\n"
+            f"4️⃣ When the Image appears after fetching the image, scroll down and click the Download Image button."
             if is_premium else
             f"*🔰You are not a premium member!🔰*"
             f"\n\nTo use this bot, you must first purchase a subscription. Please click on the button below to make the payment."
