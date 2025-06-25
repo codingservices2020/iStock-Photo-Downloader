@@ -68,7 +68,6 @@ def load_subscriptions():
         return {}  # Return empty dict instead of crashing
 
 
-
 def remove_expired_subscriptions():
     """Remove expired subscriptions from Firestore"""
     now = datetime.now()
@@ -82,6 +81,3 @@ def remove_expired_subscriptions():
         if expiry_date < now:
             db.collection(DB_FILE_NAME).document(user.id).delete()
             print(f"Deleted expired subscription for user {user.id}")
-
-
-    # remove_expired_subscriptions()
