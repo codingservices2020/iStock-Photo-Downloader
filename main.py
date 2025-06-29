@@ -21,11 +21,11 @@ import string
 import asyncio
 import logging
 
-# from keep_alive import keep_alive
-# keep_alive()
+from keep_alive import keep_alive
+keep_alive()
 
-from dotenv import load_dotenv
-load_dotenv()
+# from dotenv import load_dotenv
+# load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
