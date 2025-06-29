@@ -8,8 +8,8 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-DB_FILE_NAME = "testing_database"  # Define the firebase database file
-# DB_FILE_NAME = "iStock_Downloader_subscriptions"  # Define the firebase database file
+# DB_FILE_NAME = "testing_database"  # Define the firebase database file
+DB_FILE_NAME = "iStock_Downloader_subscriptions"  # Define the firebase database file
 
 # Build the Firebase credentials dictionary dynamically
 firebase_config = {
