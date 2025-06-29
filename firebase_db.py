@@ -8,8 +8,8 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# DB_FILE_NAME = "testing_database"  # Define the firebase database file
-DB_FILE_NAME = "iStock_Downloader_subscriptions"  # Define the firebase database file
+DB_FILE_NAME = "testing_database"  # Define the firebase database file
+# DB_FILE_NAME = "iStock_Downloader_subscriptions"  # Define the firebase database file
 
 # Build the Firebase credentials dictionary dynamically
 firebase_config = {
@@ -34,11 +34,12 @@ firebase_admin.initialize_app(cred)
 db = firestore.client()
 
 
-def save_subscription(user_id, name, expiry, email="Unknown", mobile="Unknown"):
+def save_subscription(user_id, name, expiry, email="Unknown", currency="Unknown", mobile="Unknown"):
     """Save user subscription to Firestore with email & mobile"""
     try:
         doc_ref = db.collection(DB_FILE_NAME).document(str(user_id))
         doc_ref.set({
+            "currency": currency,
             "name": name,
             "expiry": expiry.strftime("%Y-%m-%d %H:%M"),
             "email": email,
@@ -56,6 +57,7 @@ def load_subscriptions():
         users_ref = db.collection(DB_FILE_NAME).stream()
         return {
             user.id: {
+                "currency": user.to_dict().get("currency", "Unknown"),
                 "name": user.to_dict().get("name", "Unknown"),
                 "expiry": datetime.strptime(user.to_dict().get("expiry", "9999-12-31 23:59"), "%Y-%m-%d %H:%M"),
                 "email": user.to_dict().get("email", "Unknown"),
@@ -66,6 +68,7 @@ def load_subscriptions():
     except Exception as e:
         print(f"Firestore Error: {e}")
         return {}  # Return empty dict instead of crashing
+
 
 
 def remove_expired_subscriptions():
@@ -81,3 +84,7 @@ def remove_expired_subscriptions():
         if expiry_date < now:
             db.collection(DB_FILE_NAME).document(user.id).delete()
             print(f"Deleted expired subscription for user {user.id}")
+
+
+    # remove_expired_subscriptions()
+#iStock_Downloader_subscriptions
