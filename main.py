@@ -482,7 +482,7 @@ async def verify_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  f"<b>Name:</b> <a href='tg://user?id={chat_id}'>{user_name}</a>\n"
                  f"<b>Email:</b> {user_email}\n"
                  f"🆔<b>User ID:</b> {chat_id}\n"
-                 f"<b>Expiry:</b> {day} at {time_str}"
+                 f"<b>Expiry:</b> {day} at {time_str}\n"
                  f"<b>Currency:</b> {currency}",
             parse_mode="HTML"
         )
