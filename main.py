@@ -1,5 +1,5 @@
-import time
 from firebase_db import save_subscription, load_subscriptions, remove_expired_subscriptions
+from paypal import create_paypal_payment, capture_payment
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import (
     Application,
@@ -10,16 +10,16 @@ from telegram.ext import (
     filters, ConversationHandler, MessageHandler,
 )
 from telegram.error import BadRequest
-import os
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
-import asyncio
-import logging
+import time
 import requests
 import json
+import os
 import random
 import string
+import asyncio
+import logging
 
 from keep_alive import keep_alive
 keep_alive()
@@ -27,33 +27,27 @@ keep_alive()
 # from dotenv import load_dotenv
 # load_dotenv()
 
-# Configure logging
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Bot settings from environment variables
 TOKEN = os.getenv('TOKEN')
+ADMIN_CHAT_ID = int(os.getenv('ADMIN_CHAT_ID'))
 PRIVATE_CHANNEL_ID = int(os.getenv('PRIVATE_CHANNEL_ID'))
-ACCOUNT_URL = os.getenv('ACCOUNT_URL')
-MSG_DELETE_TIME = int(os.getenv('MSG_DELETE_TIME'))
+MSG_DELETE_TIME = int(os.getenv('MSG_DELETE_TIME'))  # Default to 0 if not set
+# The number of members needed to trigger the reward
 PAYMENT_URL = os.getenv('PAYMENT_URL')
-PAYMENT_CAPTURED_DETAILS_URL= os.getenv("PAYMENT_CAPTURED_DETAILS_URL")
-ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID')
-if ADMIN_CHAT_ID is not None:
-    ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)
-else:
-    raise ValueError("ADMIN_CHAT_ID is not set in environment variables")
-# PRICE = int(os.getenv("PRICE"))
+ACCOUNT_URL = os.getenv('ACCOUNT_URL')
+PAYMENT_CAPTURED_DETAILS_URL = os.getenv('PAYMENT_CAPTURED_DETAILS_URL')
+PRODUCT_NAME = "iStock Photo Downloader"
 
 subscription_data = {}
 user_data = {}
 codes_data = {}
-# SUBSCRIPTION_FILE = "subscription_data.json"
 CODES_FILE = "codes.json"
-price = 50
+payment_status = False
+
+indian_plan = "✅ Monthly Plan – Rs 50/-"
+non_indian_plan = "✅ Monthly Plan – $2"
 
 # Global variable to store the subscription code fetched from the API.
 subscription_code = None
@@ -61,7 +55,21 @@ subscription_code = None
 ENTER_CODE = 1
 WAITING_FOR_CODE, WAITING_FOR_PAYMENT, WAITING_FOR_USER = range(3)
 
+# ------------------ fetching Payment details made by user------------------ #
+def fetch_payment_details(chat_id,payment_amount):
+    response = requests.get(url=PAYMENT_CAPTURED_DETAILS_URL)
+    try:
+        response.raise_for_status()
+        data = response.json()
+        for entry in data:
+            if entry['user_id'] == chat_id:
+                if entry['amount'] == str(payment_amount):
+                    return entry
+        print("No payment details found! ")
+    except requests.exceptions.HTTPError as err:
+        print("HTTP Error:", err)
 
+# ------------------ Redeem Codes------------------ #
 def load_codes():
     try:
         with open(CODES_FILE, "r") as f:
@@ -83,7 +91,7 @@ def generate_code(validity_days=1):
     # Generate a random alphanumeric code
     code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
     # Set expiry date
-    expiry_dt = datetime.now(ZoneInfo("Asia/Kolkata")) + timedelta(days=validity_days)
+    expiry_dt = datetime.now() + timedelta(days=validity_days)
     # Store the code with its expiry date
     codes_data[code] = expiry_dt.strftime("%Y-%m-%d %H:%M")
     # Save the updated codes back to the file
@@ -94,7 +102,7 @@ def generate_code(validity_days=1):
 
 def remove_expired_codes():
     codes_data = load_codes()
-    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    now = datetime.now()
 
     updated_codes = {
         code: expiry for code, expiry in codes_data.items()
@@ -104,25 +112,11 @@ def remove_expired_codes():
     if len(updated_codes) != len(codes_data):
         save_codes()
 
-# ------------------ fetching Payment details made by user------------------ #
-def fetch_payment_details(chat_id,payment_amount):
-    response = requests.get(url=PAYMENT_CAPTURED_DETAILS_URL)
-    try:
-        response.raise_for_status()
-        data = response.json()
-        for entry in data:
-            if entry['user_id'] == chat_id:
-                if entry['amount'] == str(payment_amount):
-                    return entry
-        # print("No payment details found! ")
-    except requests.exceptions.HTTPError as err:
-        print("HTTP Error:", err)
-    return None  # Return None explicitly if no match is found
 
 async def generate_code_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id != ADMIN_CHAT_ID:
-        await update.message.reply_text("You are not authorized to use this command.")
+        await update.message.reply_text("🚫 You are not authorized to use this command.")
         return
     keyboard = [
         [InlineKeyboardButton("1 Day", callback_data="generate_1")],
@@ -143,16 +137,8 @@ async def process_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code = update.message.text
     global codes_data
     codes_data = load_codes()
-    # print(codes_data)
-    # print(f'code:{code}, data type: {type(code)}')
-    # print(code in codes_data)
     if code in codes_data:
-        print("Success")
-        # Default email & mobile as "Unknown"
         user_name = update.message.from_user.full_name
-        email = "Unknown"  # Placeholder if not provided
-        mobile = "Unknown"  # Placeholder if not provided
-
         expiry_dt = datetime.strptime(codes_data[code], "%Y-%m-%d %H:%M")
         # Ensure expiry_dt is in the future
         expiry_timestamp = int(expiry_dt.timestamp())
@@ -162,8 +148,10 @@ async def process_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         day = expiry_dt.strftime("%Y-%m-%d")
         time_str = expiry_dt.strftime("%H:%M")
+        day = expiry_dt.strftime("%Y-%m-%d %H:%M")
 
-        save_subscription(user_id, user_name, expiry_dt, email, mobile)
+        save_subscription(user_id=user_id, name=user_name, expiry=expiry_dt)
+
         # Refresh subscriptions from Firestore
         global subscription_data
         subscription_data = load_subscriptions()  # Refresh from Firebase
@@ -195,7 +183,7 @@ async def process_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=ADMIN_CHAT_ID,
             text=f"<b>🔰SUBSCRIPTION ACTIVATED🔰</b>\n\n"
                  f"✅ Subscription code redeem successfully\n\n"
-                 f"<b>User ID:</b> {user_id}\n"
+                 f"🆔<b>User ID:</b> {user_id}\n"
                  f"<b>Expiry:</b> {day} at {time_str}",
             parse_mode="HTML"
         )
@@ -214,80 +202,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         code = generate_code(days)
         await query.message.reply_text(f"Generated Code: `{code}` \n(Valid for {days} days)", parse_mode="Markdown")
 
-    if query.data.startswith("verify_"):
-        user_id = query.data.replace("verify_", "")
-        print(f"user id: {user_id}, data type: {type(user_id)}")
-        sent_message = await query.edit_message_text(f"♻️ Payment verifying. Please wait...")
-        try:
-            payment_details = fetch_payment_details(user_id,price)
-            if payment_details is None:
-                await query.message.reply_text("❌ There is an error in verifying your payment. Please contact Admin @coding_services.")
-                return
-            # print(payment_details)
-            paid_amount = int(payment_details['amount'])
-
-            if paid_amount==price:
-                context.job_queue.run_once(delete_message, 1, data=(sent_message.chat.id, sent_message.message_id))
-                user_name = payment_details['name']
-                user_email = payment_details['email']
-                user_mobile = payment_details['mobile']
-
-                # Set expiry date (e.g., 30 days from now)
-                expiry_dt = datetime.now(ZoneInfo("Asia/Kolkata")) + timedelta(days=30)
-
-                # Save to Firestore with real email & mobile
-                save_subscription(user_id, user_name, expiry_dt, user_email, user_mobile)
-
-                DELETED_CODES_URL = f"{PAYMENT_CAPTURED_DETAILS_URL}/amount/{paid_amount}"
-                requests.delete(url=DELETED_CODES_URL)
-                logger.info(f"User {user_id} ({user_name}) plan expires on {expiry_dt}.")
-                day = expiry_dt.strftime("%Y-%m-%d")
-                time_str = expiry_dt.strftime("%H:%M")
-                try:
-                    # Create a chat invite link with the expiry date from the code (as a Unix timestamp)
-                    invite_link = await context.bot.create_chat_invite_link(
-                        PRIVATE_CHANNEL_ID,
-                        member_limit=1,
-                        expire_date=int(expiry_dt.timestamp())
-                    )
-                    await query.message.reply_text(
-                        f"<b>🔰PAYMENT VERIFIED🔰</b>\n\n"
-                        f"🙏Thank you for making the payment.\n\n"
-                        f"🚀 Here is your premium member invite link:\n{invite_link.invite_link}\n"
-                        f"<b>(Valid for one-time use)</b>\n\n"
-                        f"✅ After joining this channel, type /start to access the ShutterStock Photo Downloader.\n\n"
-                        f"<b>🌐 Your plan will expire on {day} at {time_str}.</b>",
-                        parse_mode="HTML"
-                    )
-                    # Notify admin that this user has successfully generated the channel invite link.
-                    await context.bot.send_message(
-                        chat_id=ADMIN_CHAT_ID,
-                        text=f"<b>🔰SUBSCRIPTION PURCHASED🔰</b>\n\n"
-                             f"<b>Name:</b> <a href='tg://user?id={user_id}'>{user_name}</a>\n"
-                             f"<b>Email:</b> {user_email}\n"
-                             f"<b>Mobile No:</b> {user_mobile}\n"
-                             f"<b>User ID:</b> {user_id}\n"
-                             f"<b>Expiry:</b> {day} at {time_str}",
-                        parse_mode="HTML"
-                    )
-                    context.job_queue.run_once(delete_message, 1, data=(sent_message.chat.id, sent_message.message_id))
-                except Exception as e:
-                    await query.message.reply_text("Error generating invite link. Please try again later.")
-                    logger.error(f"Error creating invite link: {e}")
-            else:
-                await query.message.reply_text("❌ There is an error in verifying your payment. Please contact Admin @coding_services.")
-        except Exception as e:
-            context.job_queue.run_once(delete_message, 1, data=(sent_message.chat.id, sent_message.message_id))
-            await query.message.reply_text("First make the payment, then click on Verify Payment button.")
-            logger.error(f"Error verifying payment: {e}")
-            return None
-
-
 # ------------------ Periodic Task: Check Expired Subscriptions ------------------ #
 async def check_expired_subscriptions(context: ContextTypes.DEFAULT_TYPE):
     subscription_data = load_subscriptions()  # Refresh from Firebase
-    now = datetime.now(ZoneInfo("Asia/Kolkata"))
-    expired_users = []
+    now = datetime.now()
     for chat_id, details in list(subscription_data.items()):
         expiry_value = details["expiry"]
         if isinstance(expiry_value, str):
@@ -303,7 +221,7 @@ async def check_expired_subscriptions(context: ContextTypes.DEFAULT_TYPE):
                     chat_id=ADMIN_CHAT_ID,
                     text=f"<b>🔰SUBSCRIPTION EXPIRED🔰</b>\n\n"
                          f"📌 <a href='tg://user?id={chat_id}'>{subscription_data[chat_id]['name']}</a> "
-                         f"removed from the ShutterStock Downloader premium channel.",
+                         f"removed from iStock Photo Downloader channel.",
                     parse_mode="HTML"
                 )
                 await context.bot.send_message(
@@ -314,19 +232,16 @@ async def check_expired_subscriptions(context: ContextTypes.DEFAULT_TYPE):
                 logger.info(f"Removed expired user {chat_id} from the private channel.")
             except Exception as e:
                 logger.error(f"Failed to remove/unban user {chat_id}: {e}")
-            expired_users.append(chat_id)
-    for chat_id in expired_users:
-        del subscription_data[chat_id]
 
 # ------------------ Admin Command: Show Users ------------------ #
 async def show_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id != ADMIN_CHAT_ID:
-        await update.message.reply_text("You are not authorized to use this command.")
+        await update.message.reply_text("🚫 You are not authorized to use this command!")
         return
     subscription_data = load_subscriptions()  # Refresh from Firebase
     if not subscription_data:
-        await update.message.reply_text("No active users found.")
+        await update.message.reply_text("⚠️ No active users found!")
         return
     user_list = "\n".join([
         f"👤 <a href='tg://user?id={chat_id}'>{details['name']}</a> (Expiry: {details['expiry'].strftime('%Y-%m-%d %H:%M')})"
@@ -338,91 +253,253 @@ async def show_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         disable_web_page_preview=True
     )
 
-# ------------------ Start Command ------------------ #
+# Modify the `start` function to schedule message deletion
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global subscription_code  # Declare as global so we can assign to it
     try:
-        user_id = update.message.from_user.id
+        # Determine the source of the request (message or callback query)
+        if update.message:
+            user_id = update.message.from_user.id
+            chat_id = update.message.chat.id
+        elif update.callback_query:
+            user_id = update.callback_query.from_user.id
+            chat_id = update.callback_query.message.chat.id
+            await update.callback_query.answer()  # Acknowledge the callback query
+        else:
+            raise AttributeError("‼️Unable to determine the context of the request.")
+
+        # Check if the user is a member of the private channel
         chat_member = await context.bot.get_chat_member(PRIVATE_CHANNEL_ID, user_id)
         is_premium = chat_member.status in ["member", "administrator", "creator"]
-        url_button_text = "🚀Access ShutterStock Downloader🚀" if is_premium else f"🚀Make Payment of Rs {price}/-🚀"
-        verify_payment_button_text = "✅Verify Payment" if not is_premium else None
-        url_button = InlineKeyboardButton(
-            url_button_text,
+
+        button_text = f"🚀 Access {PRODUCT_NAME}" if is_premium else f"🚀 Click here to Buy"
+        button = InlineKeyboardButton(
+            button_text,
             web_app=WebAppInfo(url=ACCOUNT_URL) if is_premium else None,
-            url=PAYMENT_URL if not is_premium else None,
+            callback_data="buy_subscription" if not is_premium else None,
         )
-        keyboard = [[url_button]]
-        if verify_payment_button_text:  # Only add if it has a valid value
-            download_button = InlineKeyboardButton(verify_payment_button_text, callback_data=f"verify_{user_id}")
-            keyboard.append([download_button])
+
+        keyboard = [[button]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        sent_message = await update.message.reply_text(
-            f"*🔰You are already a premium member!🔰*\n\n"
-            f"*Steps to Use:*\n"
-            f"1️⃣ Go to Shutterstock's official website: https://www.shutterstock.com , and open any image.\n"
-            f"2️⃣ Copy image URL.\n"
-            f"3️⃣ Paste this URL into the downloader and click on the Download button.\n"
-            f"4️⃣ When the Get Image button appears after fetching the image, scroll down and click the Download Image button."
-            if is_premium else
-            f"*🔰You are not a premium member!🔰*"
-            f"\n\n👁‍🗨 To use this bot, you must first purchase a subscription. Please click on the button below to make the payment."
-            f"\n\n💰*Amount:* Rs {price}/- (Monthly)\n"
-            f"🆔*Your User ID:* `{user_id}` \n"
-            f"(Use this User ID on Razorpay Payment Gateway) "
-            f"\n\n🆘*Need Help?* Contact to [Coding Services](https://t.me/coding_services)",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
-        context.job_queue.run_once(delete_message, MSG_DELETE_TIME,
-                                   data=(sent_message.chat.id, sent_message.message_id)) if is_premium else None
+
+        if is_premium:
+            sent_message = await context.bot.send_message(
+                chat_id,
+                f"*🔰PREMIUM MEMBER!🔰*\n\n"
+                f"‼️ You are already a premium member! Click the button below to access the {PRODUCT_NAME}",
+                reply_markup=reply_markup,
+                parse_mode="Markdown"
+            )
+            # Schedule the message deletion after MSG_DELETE_TIME
+            context.job_queue.run_once(
+                delete_message,
+                when=MSG_DELETE_TIME,  # MSG_DELETE_TIME in seconds
+                data={"chat_id": chat_id, "message_id": sent_message.message_id},
+            )
+        else:
+            await update.message.reply_text(
+                f"*🔰You are already a premium member!🔰*\n\n"
+                f"*Steps to Use:*\n"
+                f"1️⃣ Go to iStock's official website: https://www.istockphoto.com/ , and open any image.\n"
+                f"2️⃣ In browser address tap, copy the URL.\n"
+                f"3️⃣ Paste this URL into the downloader and click on the GET IMAGES button.\n"
+                f"4️⃣ When the Image appears after fetching the image, scroll down and click the Download Image button."
+                if is_premium else
+                f"*🔰You are not a premium member!🔰*"
+                f"\n\n👁‍🗨 To use this bot, you must first purchase a subscription. Please click on the button below to make the payment."
+                f"\n\n🆘*Need Help?* Contact to [Coding Services](https://t.me/coding_services)",
+                reply_markup=reply_markup,
+                parse_mode="Markdown"
+            )
     except BadRequest as e:
         logger.error(f"BadRequest Error: {e}")
     except Exception as e:
         logger.error(f"Unexpected error: {type(e).__name__} - {e}")
 
+async def buy_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-# ------------------ Admin Command: Update Price ------------------ #
-async def update_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global price
-    user_id = update.message.from_user.id
+    keyboard = [
+        [InlineKeyboardButton("For Indian Customers 🇮🇳", callback_data="india")],
+        [InlineKeyboardButton("For Non-Indian Customers 🌐", callback_data="non_india")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(
+        f"Please select an option based on your country or region. "
+        f"This will help us provide you with payment methods suitable for your location.",
+        reply_markup=reply_markup
+    )
 
-    if user_id != ADMIN_CHAT_ID:
-        await update.message.reply_text("❌ You are not authorized to use this command.")
-        return
 
-    if not context.args:
-        await update.message.reply_text("⚠️ Please provide a new price. Usage: `/update_price 2000`")
-        return
+async def handle_customer_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat.id
 
-    try:
-        new_price = int(context.args[0])
-        if new_price <= 0:
-            raise ValueError("Price must be a positive number.")
+    # Initialize user data for the chat ID if not already present
+    if chat_id not in user_data:
+        user_data[chat_id] = {}
 
-        price = new_price
-        await update.message.reply_text(f"✅ New price has been set to Rs {price}/-")
-        logger.info(f"Admin set a new price: Rs {price}/-")
-    except ValueError:
-        await update.message.reply_text("❌ Invalid price! Please enter a valid positive number.")
+    if query.data == "non_india":
+        user_data[chat_id]["region"] = "Non-India"
+        amount = 2
+    else:
+        user_data[chat_id]["region"] = "India"
+        amount = 50
+
+    user_data[chat_id]["amount"] = amount
+    user_data[chat_id]["plan"] = "Monthly"
+
+    sent_message = await query.edit_message_text(f"♻️ Creating an invoice for monthly plan. Please wait...")
+    context.job_queue.run_once(
+        delete_message,
+        when=MSG_DELETE_TIME,  # MSG_DELETE_TIME in seconds
+        data={"chat_id": chat_id, "message_id": sent_message.message_id},
+    )
+
+    if user_data[chat_id]["region"] == "Non-India":
+        order_id, approve_url = create_paypal_payment(amount)
+        user_data[chat_id]["order_id"] = order_id
+    URL = approve_url if user_data[chat_id]["region"] == "Non-India" else PAYMENT_URL
+    button_text = f"🚀Pay ${amount} now🚀" if user_data[chat_id]["region"] == "Non-India" else f"🚀Pay Rs {amount}/- now🚀"
+    keyboard = [
+        # [InlineKeyboardButton("Pay Now", web_app=WebAppInfo(url=URL))],
+        [InlineKeyboardButton(button_text, url=URL)],
+        [InlineKeyboardButton("✅ Verify Payment", callback_data="verify_payment")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await context.bot.send_message(chat_id,
+                                f"*🔰STEPS🔰*\n\n"
+                                f"1️⃣ First click on *Pay Now* button, to make the payment.\n"
+                                f"2️⃣ After making payment, you have to click on *Verify Payment* "
+                                f"button to verfity your payment and wait for few seconds. \n\n"
+                                f"🆔*Your User ID:* `{chat_id}` \n"
+                                f"(Use this User ID on Razorpay Payment Gateway)"
+                                f"\n\n🆘*Need Help?* Contact to [Coding Services](https://t.me/coding_services)",
+                                   reply_markup=reply_markup, parse_mode="Markdown")
+
+
+
+async def verify_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global payment_status
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat.id
+    sent_message = await query.edit_message_text(f"♻️ Payment verifying. Please wait...")
+    # Schedule the message deletion after MSG_DELETE_TIME
+    context.job_queue.run_once(
+        delete_message,
+        when=MSG_DELETE_TIME,  # MSG_DELETE_TIME in seconds
+        data={"chat_id": chat_id, "message_id": sent_message.message_id},
+    )
+    amount = int(user_data[chat_id]["amount"])
+    if user_data[chat_id]["region"] == "Non-India":
+        # Check if an order exists
+        if "order_id" not in user_data[chat_id]:
+            await query.edit_message_text("No payment found. Please start over.")
+            return
+        order_id = user_data[chat_id]["order_id"]
+        try:
+
+            # Verify the payment
+            payment_result = capture_payment(order_id)
+            if payment_result["status"] == "COMPLETED":
+                user_name = payment_result['name']
+                user_email = payment_result['email']
+                currency = payment_result['currency']
+                payment_status = True
+        except requests.exceptions.HTTPError as e:
+            await query.edit_message_text(f"🚫 Payment not completed. Please try again.")
+    else:
+        try:
+            # Verify the payment
+            user_id = str(chat_id)
+            payment_details = fetch_payment_details(user_id, amount)
+            if payment_details:
+                payment_status = True
+                user_name = payment_details['name']
+                user_email = payment_details.get('email', "Unknown")  # Get email, default to "Unknown"
+                user_mobile = payment_details.get('mobile', "Unknown")  # Get mobile, default to "Unknown"
+                paid_amount = int(payment_details['amount'])
+        except requests.exceptions.HTTPError as e:
+            await query.edit_message_text(f"🚫 Payment not completed. Please try again.")
+
+    if payment_status:
+        expiry_date = datetime.now() + timedelta(days=30)
+        day = expiry_date.strftime("%Y-%m-%d")
+        time_str = expiry_date.strftime("%H:%M")
+        plan = user_data[chat_id]["plan"]
+        # Save to Firestore with real email & mobile
+        if user_data[chat_id]["region"] == "Non-India":
+            currency = "USD"
+            save_subscription(user_id=chat_id, name=user_name, expiry=expiry_date, email=user_email, currency=currency)
+        else:
+            currency = "INR"
+            save_subscription(user_id=chat_id, name=user_name, expiry=expiry_date, email=user_email, currency=currency, mobile=user_mobile)
+            DELETED_CODES_URL = f"{PAYMENT_CAPTURED_DETAILS_URL}/amount/{paid_amount}"
+            requests.delete(url=DELETED_CODES_URL)
+
+        logger.info(f"User {chat_id} subscribed to {user_data[chat_id]['plan']} plan until {expiry_date}.")
+
+        try:
+            # Generate an invite link for the private channel that expires after one use
+            invite_link = await context.bot.create_chat_invite_link(
+                PRIVATE_CHANNEL_ID,
+                member_limit=1  # The link will expire after one use
+            )
+        except Exception as e:
+            logger.error(f"🚫 Failed to generate/send invite link: {e}")
+
+        await context.bot.send_message(
+            chat_id,
+            f"<b>🔰PAYMENT VERIFIED🔰</b>\n\n"
+                    f"🙏Thank you for making the payment.\n\n"
+                    f"🚀 Here is your premium member invite link:\n{invite_link.invite_link}\n"
+                    f"<b>(Valid for one-time use)</b>\n\n"
+                    f"✅ After joining this channel, type /start to access the {PRODUCT_NAME}.\n\n"
+                    f"<b>🌐 Your plan will expire on {day} at {time_str}.</b>",
+            parse_mode="HTML"
+        )
+        logger.info(f"Invite link sent to user {query.from_user.id}.")
+        # Notify admin that this user has successfully generated the channel invite link.
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=f"<b>🔰SUBSCRIPTION PURCHASED🔰</b>\n\n"
+                 f"<b>Name:</b> <a href='tg://user?id={chat_id}'>{user_name}</a>\n"
+                 f"<b>Email:</b> {user_email}\n"
+                 f"🆔<b>User ID:</b> {chat_id}\n"
+                 f"<b>Expiry:</b> {day} at {time_str}\n"
+                 f"<b>Currency:</b> {currency}",
+            parse_mode="HTML"
+        )
+        context.job_queue.run_once(
+            delete_message,
+            when=0,
+            data={"chat_id": sent_message.chat.id, "message_id": sent_message.message_id},
+        )
+
+    else:
+        await query.edit_message_text("🚫 Payment not completed. Please try again.")
 
 
 # ------------------ Delete Message Function ------------------ #
 async def delete_message(context: CallbackContext):
-    chat_id, message_id = context.job.data
-    await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    async def delete_message(context: CallbackContext):
+        data = context.job.data
+        chat_id = data["chat_id"]
+        message_id = data["message_id"]
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
 
 # ------------------ New Admin Command: Admin Commands ------------------ #
 async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id != ADMIN_CHAT_ID:
-        await update.message.reply_text("You are not authorized to use this command.")
+        await update.message.reply_text("🚫 You are not authorized to use this command.")
         return
     await update.message.reply_text(
         """
 Commands available:
 /show_users - Show list of all premium users
-/update_price - Set new price for instructor bot 
 /generate_code - Generate a subscription redeem code
 """
     )
@@ -440,8 +517,6 @@ Commands available:
 """
     )
 
-
-# ------------------ Main Function ------------------ #
 def main():
     global subscription_data, codes_data
     subscription_data = load_subscriptions()  # Load from Firebase
@@ -458,21 +533,34 @@ def main():
         ],
     )
 
+    # Add command handlers
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(start, pattern="^start$"))
     application.add_handler(CommandHandler("show_users", show_users))
     application.add_handler(CommandHandler("generate_code", generate_code_command))
     application.add_handler(CommandHandler("admin_commands", admin_commands))
-    application.add_handler(CommandHandler("update_price", update_price))  # New command handler
+    application.add_handler(CallbackQueryHandler(buy_subscription, pattern="^buy_subscription$"))
+    application.add_handler(CallbackQueryHandler(handle_customer_choice, pattern="^(india|non_india)$"))
+    application.add_handler(CallbackQueryHandler(verify_payment, pattern="^verify_payment$"))
+    # application.add_handler(CallbackQueryHandler(is_premium_member, pattern="^is_premium_member$"))
     application.add_handler(CommandHandler("help", help_command))
-    # application.add_handler(CommandHandler("redeem_code", redeem_code))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(conv_handler_upload)
 
+    # Add periodic job to check expired subscriptions
     scheduler = BackgroundScheduler(timezone="UTC")
-    scheduler.add_job(lambda: asyncio.run(check_expired_subscriptions(application)), "interval", hours=1)
-    # scheduler.add_job(lambda: asyncio.run(check_expired_subscriptions(application)), "interval", minutes=1)
+    # scheduler.add_job(check_expired_subscriptions, "interval", minutes=1, args=[application])
+    scheduler.add_job(
+        lambda: asyncio.run(check_expired_subscriptions(application)),
+        "interval",
+        # minutes=1,
+        hours=1,
+    )
     scheduler.start()
+
+    # Start polling
     application.run_polling()
+
 
 if __name__ == "__main__":
     main()
