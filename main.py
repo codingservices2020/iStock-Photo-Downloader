@@ -285,7 +285,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ------------------ Periodic Task: Check Expired Subscriptions ------------------ #
 async def check_expired_subscriptions(context: ContextTypes.DEFAULT_TYPE):
-    remove_expired_subscriptions()  # Remove expired entries from Firestore
     subscription_data = load_subscriptions()  # Refresh from Firebase
     now = datetime.now(ZoneInfo("Asia/Kolkata"))
     expired_users = []
@@ -297,6 +296,7 @@ async def check_expired_subscriptions(context: ContextTypes.DEFAULT_TYPE):
             expiry_date = expiry_value
         if expiry_date < now:
             try:
+                remove_expired_subscriptions()  # Remove expired entries from Firestore
                 await context.bot.ban_chat_member(PRIVATE_CHANNEL_ID, chat_id, until_date=now)
                 await context.bot.unban_chat_member(PRIVATE_CHANNEL_ID, chat_id)
                 await context.bot.send_message(
